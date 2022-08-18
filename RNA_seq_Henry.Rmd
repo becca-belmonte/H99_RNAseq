@@ -1,0 +1,514 @@
+---
+title: "henry"
+author: "Becca Belmonte"
+date: "2022-08-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(topGO)
+library(biomaRt)
+library(plotly)
+library(tidyverse)
+library(DESeq2)
+library(kableExtra)
+library(heatmap3)
+library(viridis)
+library(ggrepel)
+library(ggbeeswarm)
+library(heatmaply)
+library(hrbrthemes)
+library(d3heatmap)
+library(dplyr)
+library(fgsea)
+
+colors_sex <- c("#CD4071", "#180F3E")
+colors_inf <- c("#000004", "#FEC98D")
+text_sex <- c("Female", "Male")
+text_inf <- c("Infected", "Uninfected")
+```
+
+## Load data 
+```{r}
+raw_counts <- read.csv("Data/raw_counts.csv")
+rownames(raw_counts) <- raw_counts$X
+raw_counts <- raw_counts %>% 
+  select(-X)
+
+normalized_counts <- read.csv("Data/normalized_counts.csv")
+rownames(normalized_counts) <- normalized_counts$X
+normalized_counts <- normalized_counts %>% 
+  select(-X)
+
+rlog_transformed_counts <- read.csv("Data/rlog_transformed_counts.csv")
+rownames(rlog_transformed_counts) <- rlog_transformed_counts$X
+rlog_transformed_counts <- rlog_transformed_counts %>% 
+  select(-X)
+
+col_data <- as.data.frame(colnames(raw_counts))
+colnames(col_data) <- "ID"
+col_data <- col_data %>% 
+  separate(ID, c("Group", "Rep"), remove = FALSE)
+rownames(col_data) <- col_data$ID
+
+Gene_ID_Flybase <- read.table("Data/fbgn_annotation_ID_fb_2020_01.tsv",header=F,sep="\t")
+colnames(Gene_ID_Flybase) <- c("Gene_name","Species","FBgn_ID","Former_FBgn_ID","CG_ID","Former_CG_ID")
+Gene_ID_Flybase <- Gene_ID_Flybase %>% 
+  filter(Species == "Dmel")
+Gene_ID_Flybase$Species <- as.factor(Gene_ID_Flybase)
+
+Drosophila_KEGG <- read.delim("Data/Drosophila_KEGG.gmt")
+
+t_Drosophila_KEGG <- as.data.frame(t(Drosophila_KEGG))
+colnames(t_Drosophila_KEGG) <- t_Drosophila_KEGG[1,]
+t_Drosophila_KEGG <- as.list(t_Drosophila_KEGG[-c(1,2), ])
+
+
+Drosophila_REACTOME <- read.delim("Data/Drosophila_REACTOME.gmt")
+
+t_Drosophila_REACTOME <- as.data.frame(t(Drosophila_REACTOME))
+colnames(t_Drosophila_REACTOME) <- t_Drosophila_REACTOME[1,]
+t_Drosophila_REACTOME <- as.list(t_Drosophila_REACTOME[-c(1,2), ])
+```
+
+## Functions 
+```{r}
+raw_count_func <- function(genes, Stage, Tissue) {
+  if(stages == "adult" & tissues == "hemocyte"){sel <- "hem"}
+  if(tissues == "carcass"){sel <- "car"}
+  if(stages == "larvae"){sel <- "lar"}else
+  {sel <- "hem"}
+  col_data_func <- col_data %>% 
+    filter(Stage == stages & Tissue == tissues) %>% 
+    arrange(ID)
+  fpkm <- fpkm_counts %>% 
+    mutate(gene = rownames(fpkm_counts)) %>% 
+    filter(gene %in% genes) 
+  rownames(fpkm) <- fpkm$gene
+  fpkm <- fpkm %>% 
+    dplyr::select(contains(sel))
+  fpkm <- as.data.frame(t(fpkm))
+  fpkm <- fpkm %>% 
+    mutate(group = rownames(fpkm)) %>% 
+    arrange(group) 
+  fpkm <- cbind(fpkm, col_data_func) 
+  fpkm <- fpkm %>% pivot_longer(genes, names_to = "gene", values_to = "counts")
+  fpkm$Rep <- as.factor(fpkm$Rep)
+  fpkm$Time_post_inf <- relevel((as.factor(fpkm$Time_post_inf)), "UC")
+  if(sel == "lar"){raw <- fpkm %>% ggplot(aes(x = Sex, y = counts, color = Sex, fill = Sex)) +
+    geom_boxplot(alpha = 0.5) +
+    geom_beeswarm() +
+    scale_color_manual(values = colors_sex) +
+    scale_fill_manual(values = colors_sex) +
+    facet_wrap(~gene, scale = "free") +
+    theme_classic() +
+    xlab("") +
+    ylab("Normalized counts (fpkm)") +
+    ggtitle(paste("Gene expression in", stages, tissues))}else{
+      
+      raw <- fpkm %>% ggplot(aes(x = Time_post_inf, y = counts, group = Sex, color = Sex, fill = Sex)) +
+        geom_smooth() +
+        geom_beeswarm() +
+        scale_color_manual(values = colors_sex) +
+        scale_fill_manual(values = colors_sex) +
+        facet_wrap(~gene, scale = "free") +
+        theme_classic() +
+        xlab("Time post injection") +
+        ylab("Normalized counts (fpkm)") +
+        ggtitle(paste("Gene expression in", stages, tissues))}
+  return(raw)
+  
+}
+
+volcano_func <- function(x){
+  colors_vol <- c(colors_sex, "darkgrey")
+x <- x %>% 
+  mutate(color = factor(case_when(log2FoldChange >= 2 & pvalue < 0.05 ~ "blue", 
+                                  log2FoldChange <= -2 & pvalue < 0.05 ~ "red", 
+                                  log2FoldChange %in% c(-2:2) ~ "grey"))) %>% 
+  mutate(significance = case_when(log2FoldChange >= 2 ~ "yes", log2FoldChange <= -2 ~ "yes")) 
+significant <- subset(x, significance=="yes")
+sig_genes <- significant$gene
+
+x$color <- as.character(x$color)
+x$color <- replace_na(x$color,"black")
+
+(volcano <- ggplot(x, aes(x = log2FoldChange, y = -log10(pvalue), label = gene)) +
+  geom_point(aes(color = color), alpha = 0.5)+
+  geom_text_repel(aes(label = gene)) +
+  geom_vline(xintercept=2,color="darkgrey", linetype = "dotted")+
+  geom_vline(xintercept=-2,color="darkgrey", linetype = "dotted")+
+  geom_hline(yintercept=-log10(0.05),color="darkgrey",linetype="dashed") +
+  theme_bw() +
+  scale_colour_manual(limits=c("blue","red", "black"),
+                      values = colors_vol,
+                      labels=c("Upregulated in females","Upregulated in males","ns")) +
+  labs(color = "Sex bias") +
+  ggtitle("Differential expression in male and female infected hemocytes"))
+  return(volcano)
+}
+```
+
+## Analysis
+
+```{r}
+rownames(col_data) %in% colnames(raw_counts)
+
+matrix_raw_counts <- as.matrix(raw_counts)
+
+dds <- DESeqDataSetFromMatrix(countData = matrix_raw_counts, 
+                                   colData = col_data,
+                                   design = ~ Group)
+
+dds <- estimateSizeFactors(dds)
+
+vsdB = varianceStabilizingTransformation(dds)
+plotPCA(vsdB,intgroup = c("Group"))
+
+ddsTC <- DESeq(dds)
+resTC <- results(ddsTC)
+
+resTC$gene <- rownames(resTC)
+tab_resTC <- as.data.frame(resTC)
+tab_resTC$gene <- rownames(tab_resTC)
+
+tab_resTC <- cbind(tab_resTC, Gene_ID_Flybase[match(tab_resTC$gene, Gene_ID_Flybase$FBgn_ID), "Gene_name"])
+colnames(tab_resTC)[ncol(tab_resTC)] = "Gene_name"
+
+tab_resTC <- cbind(tab_resTC, Gene_ID_Flybase[match(tab_resTC$gene, Gene_ID_Flybase$FBgn_ID), "CG_ID"])
+colnames(tab_resTC)[ncol(tab_resTC)] = "CG_ID"
+
+tab_resTC <- tab_resTC %>% 
+  mutate(Gene_name = coalesce(Gene_name, gene))
+
+tab_top <- tab_resTC %>% 
+  filter(abs(log2FoldChange) > 1 & padj < 0.05) %>% 
+  arrange(padj)
+
+
+kable(head(tab_top, 10)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  scroll_box(width = "100%")
+
+#write.csv(tab_top, file = "Results/tab_top.csv")
+```
+
+## GSEA
+```{r}
+colors_vol <- c(rev(viridis(2)), "darkgrey")
+
+ranks <- tab_resTC$log2FoldChange[!is.na(tab_resTC$log2FoldChange)]
+names(ranks) <- tab_resTC$CG_ID[!is.na(tab_resTC$log2FoldChange)]
+head(ranks)
+barplot(sort(ranks, decreasing = T))
+
+fgseaRes <- fgsea(t_Drosophila_REACTOME, ranks, minSize = 15, maxSize = 500)
+head(fgseaRes[order(padj, -abs(NES)), ], n=10)
+plotEnrichment(t_Drosophila_REACTOME[["Golgi Associated Vesicle Biogenesis"]], ranks) +
+  ggtitle("Golgi Associated Vesicle Biogenesis")
+
+fgseaRes <- fgseaRes %>% 
+  mutate(color = factor(case_when(NES >= 1 & pval < 0.05 ~ "blue", 
+                                  NES <= -1 & pval < 0.05 ~ "red", 
+                                  NES %in% c(-1:1) ~ "grey")))
+
+ggplot(fgseaRes, aes(x = NES, y = -log10(pval))) +
+  geom_point(aes(color = color))+
+  geom_text_repel(data = (fgseaRes %>% filter(pval < 0.025)),aes(label = pathway)) +
+  ggtitle("Enriched pathways without regulators of apoptosis") +
+  theme_light()+
+  scale_colour_manual(limits=c("blue","red", "black"),
+                      values = colors_vol,
+                      labels=c("Enriched in H99","Enriched in control","ns")) +
+  labs(color = "")
+
+fgseaRes_KEGG <- fgsea(t_Drosophila_KEGG, ranks, minSize = 15, maxSize = 500)
+plotEnrichment(t_Drosophila_KEGG[["Phagosome"]], ranks) +
+  ggtitle("Phagosome")
+
+fgseaRes_KEGG <- fgseaRes_KEGG %>% 
+  mutate(color = factor(case_when(NES >= 1 & pval < 0.05 ~ "blue", 
+                                  NES <= -1 & pval < 0.05 ~ "red", 
+                                  NES %in% c(-1:1) ~ "grey")))
+
+ggplot(fgseaRes_KEGG, aes(x = NES, y = -log10(pval))) +
+  geom_point(aes(color = color))+
+  geom_text_repel(data = (fgseaRes_KEGG %>% filter(pval < 0.1)),aes(label = pathway)) +
+  ggtitle("Enriched KEGG pathways without regulators of apoptosis") +
+  theme_light()+
+  scale_colour_manual(limits=c("blue","red", "black"),
+                      values = colors_vol,
+                      labels=c("Enriched in H99","Enriched in control","ns")) +
+  labs(color = "")
+
+phago_genes <- tab_resTC %>% 
+  filter(CG_ID %in% t_Drosophila_KEGG[["Phagosome"]])
+
+top_phago_genes <- c("FBgn0264077", "FBgn0003884", "FBgn0005671", "FBgn0040377", "FBgn0261797")
+```
+
+## Raw counts
+```{r}
+best12 <- head(tab_top_down,12)
+best12_genes <- best12$gene
+
+col_data <- col_data %>% 
+  arrange(ID)
+
+normalized <- normalized_counts %>% 
+  mutate(gene = rownames(normalized_counts)) %>% 
+  filter(gene %in% best12_genes) %>% 
+  select(-gene)
+normalized <- as.data.frame(t(normalized))
+normalized <- normalized %>% 
+  mutate(group = rownames(normalized)) %>% 
+  arrange(group) %>% 
+  cbind(col_data) %>% 
+  pivot_longer(best12_genes, names_to = "gene", values_to = "counts")
+normalized$Rep <- as.factor(normalized$Rep)
+
+normalized <- cbind(normalized, Gene_ID_Flybase[match(normalized$gene, Gene_ID_Flybase$FBgn_ID), "Gene_name"])
+colnames(normalized)[ncol(normalized)] = "Gene_name"
+normalized <- normalized %>% 
+  mutate(Gene_name = coalesce(Gene_name, gene))
+
+(rawcounts <- ggplot(normalized, aes(x = Group, y = counts)) +
+  geom_point(aes(color = Group), position = position_dodge(width = 0.75)) +
+  scale_color_manual(values = (viridis(2))) +
+  facet_wrap(~Gene_name, scale = "free_y") +
+  theme_classic() +
+  xlab("Genotype") +
+  ylab("Normalized counts") +
+  ggtitle("Top differentially expressed genes without apoptosis"))
+#ggsave("Results/car_rawcounts.png", plot = car_rawcounts, width = 240, height = 150, units = "mm")
+
+
+
+col_data <- col_data %>% 
+  arrange(ID)
+
+normalized <- normalized_counts %>% 
+  mutate(gene = rownames(normalized_counts)) %>% 
+  filter(gene %in% top_phago_genes) %>% 
+  select(-gene)
+normalized <- as.data.frame(t(normalized))
+normalized <- normalized %>% 
+  mutate(group = rownames(normalized)) %>% 
+  arrange(group) %>% 
+  cbind(col_data) %>% 
+  pivot_longer(top_phago_genes, names_to = "gene", values_to = "counts")
+normalized$Rep <- as.factor(normalized$Rep)
+
+normalized <- cbind(normalized, Gene_ID_Flybase[match(normalized$gene, Gene_ID_Flybase$FBgn_ID), "Gene_name"])
+colnames(normalized)[ncol(normalized)] = "Gene_name"
+normalized <- normalized %>% 
+  mutate(Gene_name = coalesce(Gene_name, gene))
+
+(rawcounts <- ggplot(normalized, aes(x = Group, y = counts)) +
+  geom_point(aes(color = Group), position = position_dodge(width = 0.75)) +
+  scale_color_manual(values = (viridis(2))) +
+  facet_wrap(~Gene_name, scale = "free_y") +
+  theme_classic() +
+  xlab("Genotype") +
+  ylab("Normalized counts") +
+  ggtitle("Top differentially expressed phagosome-associated genes without apoptosis"))
+#ggsave("Results/car_rawcounts.png", plot = car_rawcounts, width = 240, height = 150, units = "mm")
+
+genes_of_interest <- c("FBgn0025678", "FBgn0037222", "FBgn0020493", "FBgn0039099")
+
+col_data <- col_data %>% 
+  arrange(ID)
+
+
+normalized <- normalized_counts %>% 
+  mutate(gene = rownames(normalized_counts)) %>% 
+  filter(gene %in% genes_of_interest) %>% 
+  select(-gene)
+normalized <- as.data.frame(t(normalized))
+normalized <- normalized %>% 
+  mutate(group = rownames(normalized)) %>% 
+  arrange(group) %>% 
+  cbind(col_data) %>% 
+  pivot_longer(genes_of_interest, names_to = "gene", values_to = "counts")
+normalized$Rep <- as.factor(normalized$Rep)
+
+normalized <- cbind(normalized, Gene_ID_Flybase[match(normalized$gene, Gene_ID_Flybase$FBgn_ID), "Gene_name"])
+colnames(normalized)[ncol(normalized)] = "Gene_name"
+normalized <- normalized %>% 
+  mutate(Gene_name = coalesce(Gene_name, gene))
+
+(rawcounts <- ggplot(normalized, aes(x = Group, y = counts)) +
+  geom_point(aes(color = Group), position = position_dodge(width = 0.75)) +
+  scale_color_manual(values = (viridis(2))) +
+  facet_wrap(~Gene_name, scale = "free_y") +
+  theme_classic() +
+  xlab("Genotype") +
+  ylab("Normalized counts") +
+  ggtitle("Top genes lost without apoptosis"))
+#ggsave("Results/car_rawcounts.png", plot = car_rawcounts, width = 240, height = 150, units = "mm")
+```
+
+## Heatmap
+```{r}
+rldTC <- rlog(ddsTC)
+colors <- colorRampPalette( viridis(9) )(28236)
+sidecols_inf <- (viridis(2))[ rldTC$Group ]
+sidecols <- cbind(sidecols_inf)
+leg_fill <- c(viridis(2))
+text_fill <- c("Control", "H99")
+top <- tab_top$gene
+
+mat <- assay(rldTC)[top, ]
+
+mat <- mat - rowMeans(mat)
+colnames(mat) <- paste0(rldTC$Group,"-",rldTC$Rep)
+
+heatmap3(mat, trace="none",col=colors, ColSideColors=sidecols, ColSideColorsSize=2, RowSideColorsSize=1,
+         labCol=NULL, labRow=rownames(mat),RowSideLabs=F, ColSideLabs=F,mar=c(5,12), key.title = "Expression", cexRow = 1,scale="row")
+legend("topright",legend=text_fill,
+fill=leg_fill, border=FALSE, bty="n", y.intersp = 0.9, cex=0.9)
+
+#grid.echo()
+#carcass_heatmap <- grid.grab()
+
+#png(filename = "Results/carcass_heatmap.png", width = 1000, height = 1000, units = "px")
+#grid.draw(carcass_heatmap)
+#dev.off()
+# 
+# 
+# (heat <- heatmaply(mat, xlab = "", ylab = "", main = "", scale = "column",
+#           margins = c(60,100,40,20), 
+#           grid_width = 0.00001, titleX = FALSE,
+#           hide_colorbar = TRUE, branches_lwd = 0.1, 
+#           label_names = c("Gene", "Sample", "Value"),
+#           fontsize_row = 10, fontsize_col = 10,
+#           labCol = colnames(mat),
+#           labRow = rownames(mat),
+#           heatmap_layers = theme(axis.line = element_blank())))
+```
+
+## Volcano plot
+```{r}
+colors_vol <- c(rev(viridis(2)), "darkgrey")
+tab_resTC <- tab_resTC %>% 
+  mutate(color = factor(case_when(log2FoldChange >= 2 & padj < 0.05 ~ "up", 
+                                  log2FoldChange <= -2 & padj < 0.05 ~ "down", 
+                                  log2FoldChange %in% c(-2:2) ~ "ns"))) %>% 
+  mutate(significance = case_when(log2FoldChange >= 2 ~ "yes", log2FoldChange <= -2 ~ "yes"))
+significant <- subset(tab_resTC, significance=="yes")
+sig_genes <- significant$gene
+
+tab_resTC$color <- as.character(tab_resTC$color)
+tab_resTC$color <- replace_na(tab_resTC$color,"black")
+
+tab_resTC <- tab_resTC %>% 
+  mutate(Gene_name = coalesce(Gene_name, gene))
+
+
+(carcass <- ggplot(tab_resTC, aes(x = log2FoldChange, y = -log10(pvalue), label = Gene_name)) +
+  geom_point(aes(color = color), alpha = 0.5)+
+  geom_text_repel(data = tab_resTC %>% filter(log2FoldChange < -2 | log2FoldChange > 2.5) %>% filter(pvalue <10^-5), aes(label = Gene_name)) +
+  geom_vline(xintercept=2,color="darkgrey", linetype = "dotted")+
+  geom_vline(xintercept=-2,color="darkgrey", linetype = "dotted")+
+  geom_hline(yintercept=-log10(0.05),color="darkgrey",linetype="dashed") +
+  theme_bw() +
+  scale_colour_manual(limits=c("up","down", "ns"),
+                      values = colors_vol,
+                      labels=c("Upregulated in H99","Upregulated in control","ns")) +
+  labs(color = "") +
+  ggtitle("Differential expression in control and H99 mutants"))
+ggplotly(carcass)
+#ggsave("Results/car_volcano.png", plot = carcass, width = 240, height = 150, units = "mm") 
+```
+
+## GO
+```{r}
+mart <- useDataset(dataset = "dmelanogaster_gene_ensembl",
+                   mart = useMart("ENSEMBL_MART_ENSEMBL"))
+resultTable <- getBM(attributes = c("flybase_gene_id", "external_gene_name","go_id", "name_1006", "definition_1006"),
+                     mart = mart)
+resultTable <- resultTable[resultTable$go_id != '',]
+geneID2GO <- by(resultTable$go_id,
+                resultTable$external_gene_name,
+                function(x) as.character(x))
+
+datRef <- tab_resTC$Gene_name #full set of genes in your analysis (ie. rownames of your summarised experiment input into DEseq2)
+tab_top_up <- tab_top %>% 
+  filter(log2FoldChange > 0)
+
+theGenes <- tab_top_up$Gene_name#set of flybase IDs that you want to query
+
+geneNames <- tab_resTC$Gene_name
+myInterestingGenes <- tab_top_up$Gene_name
+
+geneList <- tab_resTC %>% 
+  filter(Gene_name %in% myInterestingGenes) %>% 
+  na.omit(geneList)
+geneList <- geneList %>% 
+  arrange(pvalue)
+geneList_pvalue <- geneList[,5]
+geneList_name <- as.character(geneList$Gene_name)
+names(geneList_pvalue) <- geneList_name
+geneList <- geneList_pvalue
+
+#write.csv(geneList_F_UC_8,"geneList_F_UC_8.csv",col.names=F,row.names=T)
+
+
+all_genes <- sort(unique(as.character(resultTable$external_gene_name)))
+int_genes <- factor(as.integer(all_genes %in% geneList_name))
+names(int_genes) = all_genes
+
+GOdata <- new("topGOdata", ontology = "BP", allGenes = int_genes, 
+              annot = annFUN.gene2GO, gene2GO = geneID2GO)
+
+GO_results_classic <- runTest(GOdata, algorithm = "classic", statistic = "Fisher")
+GO_results_elim <- runTest(GOdata, algorithm = "elim", statistic = "Fisher")
+GO_results_tab_up <- GenTable(object = GOdata, classic = GO_results_classic, elim = GO_results_elim, orderBy = "elim", ranksOf = "classic", topNodes = 50)
+
+kable(GO_results_tab_up) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>% scroll_box(width = "100%")
+
+tab_top_down <- tab_top %>% 
+  filter(log2FoldChange < 0)
+
+theGenes <- tab_top_down$Gene_name#set of flybase IDs that you want to query
+
+geneNames <- tab_resTC$Gene_name
+myInterestingGenes <- tab_top_down$Gene_name
+
+geneList <- tab_resTC %>% 
+  filter(Gene_name %in% myInterestingGenes) %>% 
+  na.omit(geneList)
+geneList <- geneList %>% 
+  arrange(pvalue)
+geneList_pvalue <- geneList[,5]
+geneList_name <- as.character(geneList$Gene_name)
+names(geneList_pvalue) <- geneList_name
+geneList <- geneList_pvalue
+
+#write.csv(geneList_F_UC_8,"geneList_F_UC_8.csv",col.names=F,row.names=T)
+
+
+all_genes <- sort(unique(as.character(resultTable$external_gene_name)))
+int_genes <- factor(as.integer(all_genes %in% geneList_name))
+names(int_genes) = all_genes
+
+GOdata <- new("topGOdata", ontology = "BP", allGenes = int_genes, 
+              annot = annFUN.gene2GO, gene2GO = geneID2GO)
+
+GO_results_classic <- runTest(GOdata, algorithm = "classic", statistic = "Fisher")
+GO_results_elim <- runTest(GOdata, algorithm = "elim", statistic = "Fisher")
+GO_results_tab_down <- GenTable(object = GOdata, classic = GO_results_classic, elim = GO_results_elim, orderBy = "elim", ranksOf = "classic", topNodes = 50)
+
+kable(GO_results_tab_down) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>% scroll_box(width = "100%")
+```
+
+
+
+
