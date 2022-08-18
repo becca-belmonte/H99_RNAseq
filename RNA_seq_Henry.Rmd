@@ -2,7 +2,19 @@
 title: "henry"
 author: "Becca Belmonte"
 date: "2022-08-11"
-output: html_document
+output: 
+  
+  html_document:
+    code_folding: hide
+    number_sections: false
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    fig_caption: true
+    theme: cosmo
+  chunk_output_type: console
+editor_options: 
+  chunk_output_type: inline
 ---
 
 ```{r setup, include=FALSE}
@@ -10,7 +22,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # Libraries
-```{r}
+```{r message=FALSE, warning=FALSE, include=FALSE}
 library(topGO)
 library(biomaRt)
 library(plotly)
@@ -33,8 +45,10 @@ text_sex <- c("Female", "Male")
 text_inf <- c("Infected", "Uninfected")
 ```
 
+github link: https://github.com/becca-belmonte/H99_RNAseq
+
 ## Load data 
-```{r}
+```{r message=FALSE, warning=FALSE, include=FALSE}
 raw_counts <- read.csv("Data/raw_counts.csv")
 rownames(raw_counts) <- raw_counts$X
 raw_counts <- raw_counts %>% 
@@ -77,7 +91,7 @@ t_Drosophila_REACTOME <- as.list(t_Drosophila_REACTOME[-c(1,2), ])
 ```
 
 ## Functions 
-```{r}
+```{r message=FALSE, warning=FALSE, include=FALSE}
 raw_count_func <- function(genes, Stage, Tissue) {
   if(stages == "adult" & tissues == "hemocyte"){sel <- "hem"}
   if(tissues == "carcass"){sel <- "car"}
@@ -156,8 +170,10 @@ x$color <- replace_na(x$color,"black")
 
 ## Analysis
 
-```{r}
-rownames(col_data) %in% colnames(raw_counts)
+First, we can see that the samples primarily differ in expression due to being control or H99 samples. We can also see the top differentially expressed genes, both those higher in control and those higher in H99 mutants.
+
+```{r message=FALSE, warning=FALSE}
+#rownames(col_data) %in% colnames(raw_counts)
 
 matrix_raw_counts <- as.matrix(raw_counts)
 
@@ -190,6 +206,8 @@ tab_top <- tab_resTC %>%
   filter(abs(log2FoldChange) > 1 & padj < 0.05) %>% 
   arrange(padj)
 
+tab_top_down <- tab_top %>% 
+  filter(log2FoldChange < 0)
 
 kable(head(tab_top, 10)) %>% 
   kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>% 
@@ -199,13 +217,16 @@ kable(head(tab_top, 10)) %>%
 ```
 
 ## GSEA
-```{r}
+
+To get a better idea of what these genes are doing, I did a gene set enrichment analysis. First I looked at the reactome and unfortunately, none of them are significant with the adjusted p-value. But, we do see that Golgi Associated Vesicle Biogenesis is particularly enriched in H99 mutants when compared to the control. I then looked at KEGG pathways and saw that the phagosome pathway was enriched in control samples when compared to H99 mutants. 
+
+```{r message=FALSE, warning=FALSE}
 colors_vol <- c(rev(viridis(2)), "darkgrey")
 
 ranks <- tab_resTC$log2FoldChange[!is.na(tab_resTC$log2FoldChange)]
 names(ranks) <- tab_resTC$CG_ID[!is.na(tab_resTC$log2FoldChange)]
-head(ranks)
-barplot(sort(ranks, decreasing = T))
+#head(ranks)
+#barplot(sort(ranks, decreasing = T))
 
 fgseaRes <- fgsea(t_Drosophila_REACTOME, ranks, minSize = 15, maxSize = 500)
 head(fgseaRes[order(padj, -abs(NES)), ], n=10)
@@ -228,6 +249,7 @@ ggplot(fgseaRes, aes(x = NES, y = -log10(pval))) +
   labs(color = "")
 
 fgseaRes_KEGG <- fgsea(t_Drosophila_KEGG, ranks, minSize = 15, maxSize = 500)
+head(fgseaRes_KEGG[order(padj, -abs(NES)), ], n=10)
 plotEnrichment(t_Drosophila_KEGG[["Phagosome"]], ranks) +
   ggtitle("Phagosome")
 
@@ -253,7 +275,10 @@ top_phago_genes <- c("FBgn0264077", "FBgn0003884", "FBgn0005671", "FBgn0040377",
 ```
 
 ## Raw counts
-```{r}
+
+I wanted to get a better idea of which genes were lost in H99 mutants, and particularly those in the phagosome pathway. 
+
+```{r message=FALSE, warning=FALSE}
 best12 <- head(tab_top_down,12)
 best12_genes <- best12$gene
 
@@ -285,8 +310,6 @@ normalized <- normalized %>%
   xlab("Genotype") +
   ylab("Normalized counts") +
   ggtitle("Top differentially expressed genes without apoptosis"))
-#ggsave("Results/car_rawcounts.png", plot = car_rawcounts, width = 240, height = 150, units = "mm")
-
 
 
 col_data <- col_data %>% 
@@ -317,44 +340,13 @@ normalized <- normalized %>%
   xlab("Genotype") +
   ylab("Normalized counts") +
   ggtitle("Top differentially expressed phagosome-associated genes without apoptosis"))
-#ggsave("Results/car_rawcounts.png", plot = car_rawcounts, width = 240, height = 150, units = "mm")
 
-genes_of_interest <- c("FBgn0025678", "FBgn0037222", "FBgn0020493", "FBgn0039099")
-
-col_data <- col_data %>% 
-  arrange(ID)
-
-
-normalized <- normalized_counts %>% 
-  mutate(gene = rownames(normalized_counts)) %>% 
-  filter(gene %in% genes_of_interest) %>% 
-  select(-gene)
-normalized <- as.data.frame(t(normalized))
-normalized <- normalized %>% 
-  mutate(group = rownames(normalized)) %>% 
-  arrange(group) %>% 
-  cbind(col_data) %>% 
-  pivot_longer(genes_of_interest, names_to = "gene", values_to = "counts")
-normalized$Rep <- as.factor(normalized$Rep)
-
-normalized <- cbind(normalized, Gene_ID_Flybase[match(normalized$gene, Gene_ID_Flybase$FBgn_ID), "Gene_name"])
-colnames(normalized)[ncol(normalized)] = "Gene_name"
-normalized <- normalized %>% 
-  mutate(Gene_name = coalesce(Gene_name, gene))
-
-(rawcounts <- ggplot(normalized, aes(x = Group, y = counts)) +
-  geom_point(aes(color = Group), position = position_dodge(width = 0.75)) +
-  scale_color_manual(values = (viridis(2))) +
-  facet_wrap(~Gene_name, scale = "free_y") +
-  theme_classic() +
-  xlab("Genotype") +
-  ylab("Normalized counts") +
-  ggtitle("Top genes lost without apoptosis"))
-#ggsave("Results/car_rawcounts.png", plot = car_rawcounts, width = 240, height = 150, units = "mm")
 ```
 
 ## Heatmap
-```{r}
+
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
 rldTC <- rlog(ddsTC)
 colors <- colorRampPalette( viridis(9) )(28236)
 sidecols_inf <- (viridis(2))[ rldTC$Group ]
@@ -393,7 +385,10 @@ fill=leg_fill, border=FALSE, bty="n", y.intersp = 0.9, cex=0.9)
 ```
 
 ## Volcano plot
-```{r}
+
+With the volcano plot, we can see that *Dad* and *CaBP1* are downregulated in H99 mutants, while FBgn0085466 (which is CG34437) and CG14715 are upregulated in H99 mutants.
+
+```{r message=FALSE, warning=FALSE}
 colors_vol <- c(rev(viridis(2)), "darkgrey")
 tab_resTC <- tab_resTC %>% 
   mutate(color = factor(case_when(log2FoldChange >= 2 & padj < 0.05 ~ "up", 
@@ -404,7 +399,7 @@ significant <- subset(tab_resTC, significance=="yes")
 sig_genes <- significant$gene
 
 tab_resTC$color <- as.character(tab_resTC$color)
-tab_resTC$color <- replace_na(tab_resTC$color,"black")
+tab_resTC$color <- replace_na(tab_resTC$color,"ns")
 
 tab_resTC <- tab_resTC %>% 
   mutate(Gene_name = coalesce(Gene_name, gene))
@@ -423,11 +418,13 @@ tab_resTC <- tab_resTC %>%
   labs(color = "") +
   ggtitle("Differential expression in control and H99 mutants"))
 ggplotly(carcass)
-#ggsave("Results/car_volcano.png", plot = carcass, width = 240, height = 150, units = "mm") 
 ```
 
 ## GO
-```{r}
+
+The first table shows GO terms that are enriched in upregulated genes, so those that are higher in H99 mutants than control. The second table shows GO terms enriched in downregulated genes, those that are lower in H99 mutants.
+
+```{r message=FALSE, warning=FALSE}
 mart <- useDataset(dataset = "dmelanogaster_gene_ensembl",
                    mart = useMart("ENSEMBL_MART_ENSEMBL"))
 resultTable <- getBM(attributes = c("flybase_gene_id", "external_gene_name","go_id", "name_1006", "definition_1006"),
